@@ -19,6 +19,7 @@
 #include "voip_patrol.hh"
 #include "mod_voip_patrol.hh"
 #include "action.hh"
+#include "check.hh"
 #define THIS_FILE "voip_patrol.cc"
 #include <pjsua2/account.hpp>
 #include <pjsua2/call.hpp>
@@ -26,6 +27,7 @@
 #include <pj/ctype.h>
 #include "util.hpp"
 #include <pjsua-lib/pjsua_internal.h>
+#include <algorithm>
 
 using namespace pj;
 
@@ -46,6 +48,56 @@ call_state_t get_call_state_from_string (string state) {
 	return INV_STATE_NULL;
 }
 
+string get_call_state_from_id (int state) {
+	if (state == INV_STATE_CALLING) return "CALLING";
+	if (state == INV_STATE_INCOMING) return "INCOMING";
+	if (state == INV_STATE_EARLY) return "EARLY";
+	if (state == INV_STATE_CONNECTING) return "CONNECTING";
+	if (state == INV_STATE_CONFIRMED) return "CONFIRMED";
+	if (state == INV_STATE_DISCONNECTED) return "DISCONNECTED";
+	return "UKNOWN";
+}
+
+static pj_status_t stream_to_call(TestCall* call, pjsua_call_id call_id, const char *caller_contact ) {
+	pj_status_t status = PJ_SUCCESS;
+	// Create a player if none.
+	if (call->player_id < 0) {
+		char * fn = new char [call->test->play.length()+1];
+		strcpy (fn, call->test->play.c_str());
+		const pj_str_t file_name = pj_str(fn);
+		status = pjsua_player_create(&file_name, 0, &call->player_id);
+		delete[] fn;
+		if (status != PJ_SUCCESS) {
+			LOG(logINFO) <<__FUNCTION__<<": [error] creating player";
+			return status;
+		}
+	}
+	LOG(logINFO) <<__FUNCTION__<<": connecting player_id["<<call->player_id<<"]";
+	status = pjsua_conf_connect(pjsua_player_get_conf_port(call->player_id), pjsua_call_get_conf_port(call_id));
+	LOG(logINFO) <<__FUNCTION__<<": player connected";
+	return status;
+}
+
+static pj_status_t record_call(TestCall* call, pjsua_call_id call_id, const char *caller_contact) {
+	pj_status_t status = PJ_SUCCESS;
+	// Create a recorder if none.
+	if (call->recorder_id < 0) {
+		char rec_fn[1024] = "voice_ref_files/recording.wav";
+		CallInfo ci = call->getInfo();
+		sprintf(rec_fn,"voice_files/%s_%s_rec.wav", ci.callIdString.c_str(), caller_contact);
+		call->test->record_fn = string(&rec_fn[0]);
+		const pj_str_t rec_file_name = pj_str(rec_fn);
+		status = pjsua_recorder_create(&rec_file_name, 0, NULL, -1, 0, &call->recorder_id);
+		if (status != PJ_SUCCESS) {
+			LOG(logINFO) <<__FUNCTION__<<": [error] tecord_call \n";
+			return status;
+		}
+		LOG(logINFO) <<__FUNCTION__<<": [recorder] created:" << call->recorder_id << " fn:"<< rec_fn;
+	}
+	status = pjsua_conf_connect(pjsua_call_get_conf_port(call_id), pjsua_recorder_get_conf_port(call->recorder_id));
+	return status;
+}
+
 string get_call_state_string (call_state_t state) {
 	if (state == INV_STATE_CALLING) return "CALLING";
 	if (state == INV_STATE_INCOMING) return "INCOMING";
@@ -60,29 +112,93 @@ string get_call_state_string (call_state_t state) {
  * TestCall implementation
  */
 
-struct call_param {
+/*
+ * Voip_patrol version of call_param since it was not exposed and we want more control over makeCall
+ */
+struct vp_call_param {
 	pjsua_msg_data      msg_data;
 	pjsua_msg_data     *p_msg_data;
 	pjsua_call_setting  opt;
 	pjsua_call_setting *p_opt;
 	pj_str_t            reason;
 	pj_str_t           *p_reason;
-
+	pjmedia_sdp_session *sdp;
 public:
-    /**
-     * Default constructors with specified parameters.
-     */
-	call_param(const SipTxOption &tx_option);
-	call_param(const SipTxOption &tx_option, const CallSetting &setting,
-               const string &reason_str);
+	vp_call_param(const SipTxOption &tx_option);
+	vp_call_param(const SipTxOption &tx_option, const CallSetting &setting,
+               const string &reason_str, pj_pool_t *pool = NULL,
+               const string &sdp_str = "");
 };
 
+vp_call_param::vp_call_param(const SipTxOption &tx_option) {
+	if (tx_option.isEmpty()) {
+		p_msg_data = NULL;
+	} else {
+		tx_option.toPj(msg_data);
+		p_msg_data = &msg_data;
+	}
+	p_opt = NULL;
+	p_reason = NULL;
+	sdp = NULL;
+}
+
+vp_call_param::vp_call_param(const SipTxOption &tx_option, const CallSetting &setting,
+                       const string &reason_str, pj_pool_t *pool,
+                       const string &sdp_str) {
+	if (tx_option.isEmpty()) {
+		p_msg_data = NULL;
+	} else {
+		tx_option.toPj(msg_data);
+		p_msg_data = &msg_data;
+	}
+
+	if (setting.isEmpty()) {
+		p_opt = NULL;
+	} else {
+		opt = setting.toPj();
+		p_opt = &opt;
+	}
+	reason = str2Pj(reason_str);
+	p_reason = (reason.slen == 0? NULL: &reason);
+
+	sdp = NULL;
+	if (sdp_str != "") {
+		pj_str_t dup_pj_sdp;
+		pj_str_t pj_sdp_str = {(char*)sdp_str.c_str(),
+			       (pj_ssize_t)sdp_str.size()};
+	pj_status_t status;
+
+		pj_strdup(pool, &dup_pj_sdp, &pj_sdp_str);
+		status = pjmedia_sdp_parse(pool, dup_pj_sdp.ptr,
+					dup_pj_sdp.slen, &sdp);
+	if (status != PJ_SUCCESS) {
+		PJ_PERROR(4,(THIS_FILE, status,
+			 "Failed to parse SDP for call param"));
+	}
+	}
+}
+
+void TestCall::hangup(const CallOpParam &prm) {
+		if (disconnecting) return;
+		disconnecting = true;
+		LOG(logINFO) <<__FUNCTION__<<": [hangup]";
+		Call::hangup(prm);
+}
 
 
-void TestCall::makeCall(const string &dst_uri, const CallOpParam &prm, const string &to_uri) throw(Error) {
-	pjsua_call_make_call;
+void TestCall::makeCall(const string &dst_uri, const CallOpParam &prm, const string &to_uri) {
 	pj_str_t pj_to_uri = str2Pj(dst_uri);
-	call_param param(prm.txOption, prm.opt, prm.reason);
+	vp_call_param param(prm.txOption, prm.opt, prm.reason);
+
+	// pjsua_call_setting
+	if (test->late_start) {
+		param.p_opt->flag |= PJSUA_CALL_NO_SDP_OFFER;
+		LOG(logINFO) <<__FUNCTION__<< " Late-Start: flag:"<< param.p_opt->flag << " PJSUA_CALL_NO_SDP_OFFER:" <<  PJSUA_CALL_NO_SDP_OFFER;
+	}
+	else {
+		param.p_opt->flag &= ~PJSUA_CALL_NO_SDP_OFFER;
+		LOG(logINFO) <<__FUNCTION__<< " Fast Start flag:"<< param.p_opt->flag << " PJSUA_CALL_NO_SDP_OFFER:" <<  PJSUA_CALL_NO_SDP_OFFER;
+	}
 
 	if (!to_uri.empty()) {
 		pjsua_msg_data_init(&param.msg_data);
@@ -102,6 +218,7 @@ TestCall::TestCall(TestAccount *p_acc, int call_id) : Call(*p_acc, call_id) {
 	recorder_id = -1;
 	player_id = -1;
 	role = -1; // Caller 0 | callee 1
+	disconnecting = false;
 }
 
 TestCall::~TestCall() {
@@ -124,8 +241,13 @@ void TestCall::onCallRxOffer(OnCallTsxStateParam &prm) {
 void TestCall::onCallTsxState(OnCallTsxStateParam &prm) {
 	PJ_UNUSED_ARG(prm);
 	CallInfo ci = getInfo();
-	LOG(logINFO) <<__FUNCTION__<<": ["<<getId()<<"]["<<ci.remoteUri<<"]["<<ci.stateText<<"]id["<<ci.callIdString<<"]";
-	// if (ci.stateText.compare("INCOMING")  == 0 ) pj_thread_sleep(10000);
+
+	std::string res = "call[" + std::to_string(ci.lastStatusCode) + "] reason["+ ci.lastReason +"]";
+	LOG(logINFO) <<__FUNCTION__<<": ["<<getId()<<"]["<<ci.remoteUri<<"]["<<ci.stateText<<"]id["<<ci.callIdString<<"] "<<res;
+	if (test) {
+		test->result_cause_code = (int)ci.lastStatusCode;
+		test->reason = ci.lastReason;
+	}
 }
 
 /* Convenient function to convert transmission factor to MOS */
@@ -146,15 +268,30 @@ void TestCall::onDtmfDigit(OnDtmfDigitParam &prm) {
 	test->dtmf_recv.append(prm.digit);
 }
 
+void TestCall::onCallMediaState(OnCallMediaStateParam &prm) {
+	CallInfo ci = getInfo();
+	LOG(logINFO) <<__FUNCTION__<<" id:"<<ci.id;
+}
+
+void TestCall::onCallMediaUpdate(OnCallMediaStateParam &prm) {
+	CallInfo ci = getInfo();
+	LOG(logINFO) <<__FUNCTION__<<" id:"<<ci.id;
+}
+
 void TestCall::onStreamDestroyed(OnStreamDestroyedParam &prm) {
-	LOG(logDEBUG) <<__FUNCTION__<<": idx["<<prm.streamIdx<<"]";
+	CallInfo ci = getInfo();
+	LOG(logINFO) <<__FUNCTION__<<" id:"<<ci.id<<" idx["<<prm.streamIdx<<"]";
 	pjmedia_stream const *pj_stream = (pjmedia_stream *)&prm.stream;
 	pjmedia_stream_info *pj_stream_info;
 
-	CallInfo ci = getInfo();
-	if  (ci.state == PJSIP_INV_STATE_EARLY) return;
+	if (ci.state == PJSIP_INV_STATE_EARLY) return;
+
+	LOG(logINFO) << __FUNCTION__ << ": " << get_call_state_from_id((int)(ci.state));
+
 
 	try {
+		StreamInfo const &infos = getStreamInfo(prm.streamIdx);
+		LOG(logINFO) << __FUNCTION__ << " codec name:"<< infos.codecName <<" clock rate:"<< infos.codecClockRate <<" RTP IP:"<< infos.remoteRtpAddress;
 		StreamStat const &stats = getStreamStat(prm.streamIdx);
 		RtcpStat rtcp = stats.rtcp;
 		RtcpStreamStat rxStat = rtcp.rxStat;
@@ -183,7 +320,12 @@ void TestCall::onStreamDestroyed(OnStreamDestroyedParam &prm) {
 
 		LOG(logINFO) << __FUNCTION__ <<" rtt:"<< rtcp.rttUsec.mean/1000 <<" mos_lq_tx:"<<mos_tx<<" mos_lq_rx:"<<mos_rx;
 		rtt = rtcp.rttUsec.mean/1000;
-		test->rtp_stats_json = " \"rtp_stats\":{\"rtt\":"+to_string(rtt)+","
+		if (test->rtp_stats_count > 0)
+			test->rtp_stats_json = test->rtp_stats_json + ',';
+		test->rtp_stats_json = test->rtp_stats_json + " \"rtp_stats_"+to_string(test->rtp_stats_count)+"\":{\"rtt\":"+to_string(rtt)+","
+						"\"remote_rtp_socket\": \""+infos.remoteRtpAddress+"\", "
+						"\"codec_name\": \""+infos.codecName+"\", "
+						"\"clock_rate\": \""+to_string(infos.codecClockRate)+"\", "
 						"\"Tx\":{"
 							"\"jitter_avg\": "+to_string(txStat.jitterUsec.mean/1000)+", "
 							"\"jitter_max\": "+to_string(txStat.jitterUsec.max/1000)+", "
@@ -201,6 +343,8 @@ void TestCall::onStreamDestroyed(OnStreamDestroyedParam &prm) {
 							"\"discard\": "+to_string(rxStat.discard)+", "
 							"\"mos_lq\": "+to_string(mos_rx)+"} "
 						"}";
+		test->rtp_stats_count++;
+		if (ci.state == PJSIP_INV_STATE_CONFIRMED) return;
 		test->rtp_stats_ready = true;
 		test->update_result();
 	} catch (pj::Error e)  {
@@ -209,59 +353,39 @@ void TestCall::onStreamDestroyed(OnStreamDestroyedParam &prm) {
 }
 
 void TestCall::onStreamCreated(OnStreamCreatedParam &prm) {
-	LOG(logDEBUG) <<__FUNCTION__<< " idx["<<prm.streamIdx<<"]\n";
-	//pjmedia_stream const *pj_stream = (pjmedia_stream *)&prm.stream;
-	//pjmedia_stream_info *pj_stream_info;
-	//pjmedia_stream_get_info(pj_stream, pj_stream_info);
+	CallInfo ci = getInfo();
+	LOG(logINFO) <<__FUNCTION__<<" id:"<<ci.id<<" idx["<<prm.streamIdx<<"]";
 }
-
-static pj_status_t record_call(TestCall* call, pjsua_call_id call_id, const char *caller_contact) {
-	pj_status_t status = PJ_SUCCESS;
-	pjsua_recorder_id recorder_id;
-	char rec_fn[1024] = "voice_ref_files/recording.wav";
-	CallInfo ci = call->getInfo();
-	sprintf(rec_fn,"voice_files/%s_%s_rec.wav", ci.callIdString.c_str(), caller_contact);
-	call->test->record_fn = string(&rec_fn[0]);
-	const pj_str_t rec_file_name = pj_str(rec_fn);
-	status = pjsua_recorder_create(&rec_file_name, 0, NULL, -1, 0, &recorder_id);
-	if (status != PJ_SUCCESS) {
-		LOG(logINFO) <<__FUNCTION__<<": [error] tecord_call \n";
-		return status;
-	}
-	call->recorder_id = recorder_id;
-	LOG(logINFO) <<__FUNCTION__<<": [recorder] created:" << recorder_id << " fn:"<< rec_fn;
-	status = pjsua_conf_connect( pjsua_call_get_conf_port(call_id), pjsua_recorder_get_conf_port(recorder_id) );
-}
-
-static pj_status_t stream_to_call(TestCall* call, pjsua_call_id call_id, const char *caller_contact ) {
-	pj_status_t status = PJ_SUCCESS;
-	pjsua_player_id player_id;
-	char * fn = new char [call->test->play.length()+1];
-	strcpy (fn, call->test->play.c_str());
-	const pj_str_t file_name = pj_str(fn);
-	status = pjsua_player_create(&file_name, 0, &player_id);
-	delete[] fn;
-	if (status != PJ_SUCCESS) {
-		LOG(logINFO) <<__FUNCTION__<<": [error] creating player\n";
-		return status;
-	}
-	call->player_id = player_id;
-	status = pjsua_conf_connect( pjsua_player_get_conf_port(player_id), pjsua_call_get_conf_port(call_id) );
-	return status;
-}
-
 
 void TestCall::onCallState(OnCallStateParam &prm) {
 	PJ_UNUSED_ARG(prm);
 
+	if (prm.e.type == PJSIP_EVENT_TX_MSG) {
+		pjsip_tx_data *pjsip_txdata = (pjsip_tx_data *) prm.e.body.txMsg.tdata.pjTxData;
+		if (pjsip_txdata && pjsip_txdata->msg && pjsip_txdata->msg->type == PJSIP_REQUEST_MSG) {
+			LOG(logINFO) <<__FUNCTION__<<": "+ pj2Str(pjsip_txdata->msg->line.req.method.name);
+		}
+	} else if (prm.e.type == PJSIP_EVENT_RX_MSG) {
+		pjsip_rx_data *pjsip_rxdata = (pjsip_rx_data *) prm.e.body.rxMsg.rdata.pjRxData;
+		if (pjsip_rxdata && pjsip_rxdata->msg_info.msg && pjsip_rxdata->msg_info.msg->type == PJSIP_REQUEST_MSG) {
+			LOG(logINFO) <<__FUNCTION__<<": "+ pj2Str(pjsip_rxdata->msg_info.msg->line.req.method.name);
+			std::string message;
+			message.append(pjsip_rxdata->msg_info.msg_buf, pjsip_rxdata->msg_info.len);
+			if (test) check_checks(test->checks, pjsip_rxdata->msg_info.msg, message);
+		}
+	}
+
 	LOG(logDEBUG) <<__FUNCTION__;
 	CallInfo ci = getInfo();
+
+	if (disconnecting == true && ci.state != PJSIP_INV_STATE_DISCONNECTED)
+		return;
 
 	int uri_prefix = 3; // sip:
 	std::string remote_user("");
 	std::string local_user("");
 	std::size_t pos = ci.localUri.find("@");
-	LOG(logINFO) <<__FUNCTION__<<": ["<< ci.localUri <<"]\n";
+	LOG(logINFO) <<__FUNCTION__<<": ["<< ci.localUri <<"]";
 	if (ci.localUri[0] == '<')
 		uri_prefix++;
 	if (pos!=std::string::npos) {
@@ -282,6 +406,7 @@ void TestCall::onCallState(OnCallStateParam &prm) {
 
 	if (test) {
 		pjsip_tx_data *pjsip_data = (pjsip_tx_data *) prm.e.body.txMsg.tdata.pjTxData;
+
 		if (pjsip_data && pjsip_data->tp_info.transport) {
 			test->transport = pjsip_data->tp_info.transport->type_name;
 			test->peer_socket = pjsip_data->tp_info.dst_name;
@@ -320,12 +445,13 @@ void TestCall::onCallState(OnCallStateParam &prm) {
 			dialDtmf(test->play_dtmf);
 			LOG(logINFO) <<__FUNCTION__<<": [dtmf]" << test->play_dtmf;
 		}
-		stream_to_call(this, ci.id, remote_user.c_str());
+		stream_to_call(this, ci.id, test->remote_user.c_str());
 		if (test->min_mos)
-			record_call(this, ci.id, remote_user.c_str());
+			record_call(this, ci.id, test->remote_user.c_str());
 	}
 	if (ci.state == PJSIP_INV_STATE_DISCONNECTED) {
-		LOG(logINFO) <<__FUNCTION__<<": [Call disconnected]";
+		std::string res = "call[" + std::to_string(ci.lastStatusCode) + "] reason["+ ci.lastReason +"]";
+		LOG(logINFO) <<__FUNCTION__<<": [Call disconnected] red:"<< res;
 		if (player_id != -1) {
 			pjsua_player_destroy(player_id);
 			player_id = -1;
@@ -374,6 +500,7 @@ TestAccount::TestAccount() {
 	hangup_duration=0;
 	max_duration=0;
 	ring_duration=0;
+	call_count=-1;
 	accept_label="-";
 }
 
@@ -396,10 +523,16 @@ void TestAccount::onRegState(OnRegStateParam &prm) {
 	}
 }
 
+
+
 void TestAccount::onIncomingCall(OnIncomingCallParam &iprm) {
 	TestCall *call = new TestCall(this, iprm.callId);
-
 	pjsip_rx_data *pjsip_data = (pjsip_rx_data *) iprm.rdata.pjRxData;
+
+	std::string message;
+	message.append(pjsip_data->msg_info.msg_buf, pjsip_data->msg_info.len);
+	check_checks(checks, pjsip_data->msg_info.msg, message);
+
 	CallInfo ci = call->getInfo();
 	CallOpParam prm;
 	AccountInfo acc_inf = getInfo();
@@ -408,9 +541,11 @@ void TestAccount::onIncomingCall(OnIncomingCallParam &iprm) {
 		string type("accept");
 		LOG(logINFO)<<__FUNCTION__<<": max call duration["<< hangup_duration <<"]";
 		call->test = new Test(config, type);
+		call->test->checks = checks;
 		call->test->hangup_duration = hangup_duration;
 		call->test->max_duration = max_duration;
 		call->test->ring_duration = ring_duration;
+		call->test->re_invite_interval = re_invite_interval;
 		call->test->expected_cause_code = 200;
 		LOG(logINFO)<<__FUNCTION__<<": local["<< ci.localUri <<"]";
 
@@ -422,8 +557,9 @@ void TestAccount::onIncomingCall(OnIncomingCallParam &iprm) {
 		call->test->sip_call_id = ci.callIdString;
 		call->test->transport = pjsip_data->tp_info.transport->type_name;
 		call->test->peer_socket = iprm.rdata.srcAddress;
-		call->test->state = VPT_RUN;
+		call->test->state = VPT_RUN_WAIT;
 		call->test->rtp_stats = rtp_stats;
+		call->test->late_start = late_start;
 		call->test->code = (pjsip_status_code) code;
 		call->test->reason = reason;
 		if (wait_state != INV_STATE_NULL)
@@ -433,6 +569,8 @@ void TestAccount::onIncomingCall(OnIncomingCallParam &iprm) {
 		call->test->play_dtmf = play_dtmf;
 	}
 	calls.push_back(call);
+	if (call_count > 0)
+		call_count--;
 	config->calls.push_back(call);
 	LOG(logINFO) <<__FUNCTION__<<"code:" << code <<" reason:"<< reason;
 	if (code  >= 100 && code <= 699) {
@@ -463,31 +601,6 @@ void TestAccount::onIncomingCall(OnIncomingCallParam &iprm) {
 Test::Test(Config *config, string type) : config(config), type(type) {
 	char now[20] = {'\0'};
 	get_time_string(now);
-	from="";
-	to="";
-	wait_state = INV_STATE_NULL;
-	state = VPT_RUN;
-	start_time = now;
-	min_mos = 0.0;
-	mos = 0.0;
-	expected_cause_code = -1;
-	result_cause_code = -1;
-	reason = "";
-	connect_duration = 0;
-	expected_duration = 0;
-	setup_duration = 0;
-	max_duration = 0;
-	ring_duration = 0;
-	hangup_duration = 0;
-	call_id = 0;
-	sip_call_id = "";
-	label = "-";
-	recording = false;
-	playing=false;
-	rtp_stats_ready=false;
-	rtp_stats=false;
-	queued=false;
-	completed=false;
 	LOG(logINFO)<<__FUNCTION__<<LOG_COLOR_INFO<<": New test created:"<<type<<LOG_COLOR_END;
 }
 
@@ -522,7 +635,7 @@ void Test::update_result() {
 		state = VPT_DONE;
 		std::string res = "FAIL";
 
-		LOG(logINFO)<<__FUNCTION__<<"\n";
+		LOG(logINFO)<<__FUNCTION__;
 		if (min_mos > 0 && mos == 0) {
 				return;
 		}
@@ -550,14 +663,19 @@ void Test::update_result() {
 			success=true;
 		}
 
+
 		// JSON report
-		string jsonFrom = local_user;
-		jsonify(&jsonFrom);
 		string jsonLocalUri = local_uri;
 		jsonify(&jsonLocalUri);
 		string jsonLocalContact = local_contact;
 		jsonify(&jsonLocalContact);
+		string jsonFrom = local_user;
+		if (type == "accept")
+			jsonFrom = remote_user;
 		string jsonTo = remote_user;
+		if (type == "accept")
+			jsonTo = local_user;
+		jsonify(&jsonFrom);
 		jsonify(&jsonTo);
 		string jsonRemoteUri = remote_uri;
 		jsonify(&jsonRemoteUri);
@@ -599,10 +717,33 @@ void Test::update_result() {
 							"\"remote_contact\": \""+jsonRemoteContact+"\" "
 							"}";
 
+		string result_checks_json {};
+		int x {0};
+		for (auto check : checks) {
+			LOG(logINFO)<<__FUNCTION__<<"check header["<< check.hdr.hName <<"] result["<< check.result <<"]";
+			if (x>0) result_checks_json += ",";
+			string result = check.result ? "PASS": "FAIL";
+
+			result_checks_json += "\""+to_string(x)+"\":{";
+			if (check.regex.empty()) {
+				result_checks_json += "\"header_name\": \""+check.hdr.hName+"\", "
+							"\"header_value\": \""+check.hdr.hValue+"\", ";
+			} else {
+				string json_val {check.regex};
+				jsonify(&json_val);
+				result_checks_json += "\"method\": \""+check.method+"\", "
+							"\"regex\": \""+json_val+"\", ";
+			}
+			result_checks_json += "\"result\": \""+ result +"\"}";
+			x++;
+		}
+		if (!result_checks_json.empty())
+			result_line_json += ", \"check\":{" + result_checks_json + "}";
 
 		if (rtp_stats && rtp_stats_ready)
 			result_line_json += "," + rtp_stats_json;
 		result_line_json += "}}";
+
 		config->result_file.write(result_line_json);
 		LOG(logINFO)<<__FUNCTION__<<"["<<now<<"]" << result_line_json;
 		config->result_file.flush();
@@ -683,6 +824,7 @@ bool ResultFile::open() {
 		std::cerr <<__FUNCTION__<< " [error] test can not open log file :" << name ;
 		return false;
 	}
+	return true;
 }
 
 void ResultFile::close() {
@@ -772,7 +914,7 @@ TestAccount* Config::findAccount(std::string account_name) {
 }
 
 bool Config::process(std::string p_configFileName, std::string p_jsonResultFileName) {
-	ezxml_t xml_actions, xml_action, xml_xhdr;
+	ezxml_t xml_actions, xml_action, xml_xhdr, xml_check, xml_param;
 	configFileName = p_configFileName;
 	ezxml_t xml_conf = ezxml_parse_file(configFileName.c_str());
 	xml_conf_head = xml_conf; // saving the head if the linked list
@@ -780,6 +922,16 @@ bool Config::process(std::string p_configFileName, std::string p_jsonResultFileN
 	if(!xml_conf){
 		LOG(logINFO) <<__FUNCTION__<< "[error] test can not load file :" << configFileName ;
 		return false;
+	}
+
+	for (xml_param = ezxml_child(xml_conf, "param"); xml_param; xml_param=xml_param->next) {
+		const char * n = ezxml_attr(xml_param, "name");
+		const char * v = ezxml_attr(xml_param, "value");
+		if (!n || !v) {
+			LOG(logERROR) <<__FUNCTION__<<" invalid config param !";
+			continue;
+		}
+		LOG(logINFO) <<__FUNCTION__<< " param ===> name["<<n<<"] value["<<v<<"]";
 	}
 
 	for (xml_actions = ezxml_child(xml_conf, "actions"); xml_actions; xml_actions=xml_actions->next) {
@@ -797,6 +949,45 @@ bool Config::process(std::string p_configFileName, std::string p_jsonResultFileN
 				sh.hValue = ezxml_attr(xml_xhdr, "value");
 				x_hdrs.push_back(sh);
 			}
+			vector<ActionCheck> checks;
+			// TO DO: these checks sould use get/set params like we do with action params
+			// <check-message>
+			for (xml_check = ezxml_child(xml_action, "check-message"); xml_check; xml_check=xml_check->next) {
+				ActionCheck check;
+				const char * val;
+				val = ezxml_attr(xml_check, "method");
+				if (val) {
+					check.method = string(val);
+				} else {
+					LOG(logERROR) <<__FUNCTION__<<"<check-message> missing [method] param !";
+					continue;
+				}
+				val = ezxml_attr(xml_check, "regex");
+				if (val) {
+					check.regex = string(val);
+				} else {
+					LOG(logERROR) <<__FUNCTION__<<"<check-message> missing [regex] param !";
+					continue;
+				}
+				val = ezxml_attr(xml_check, "code");
+				if (val) check.code = atoi(val);
+				LOG(logINFO) <<__FUNCTION__<<" check-message: method["<<check.method<<"] regex["<< check.regex<<"]";
+				checks.push_back(check);
+			}
+			// <checks-header>
+			for (xml_check = ezxml_child(xml_action, "check-header"); xml_check; xml_check=xml_check->next) {
+				ActionCheck check;
+				const char * val = ezxml_attr(xml_check, "name");
+				if (!val) {
+					LOG(logERROR) <<__FUNCTION__<<" missing action check header name !";
+					continue;
+				}
+				check.hdr.hName = val;
+				val = ezxml_attr(xml_check, "value");
+				if (val) check.hdr.hValue = val;
+				LOG(logINFO) <<__FUNCTION__<<" check-header:"<< check.hdr.hName<<" "<<check.hdr.hValue;
+				checks.push_back(check);
+			}
 			string action_type = ezxml_attr(xml_action,"type");;
 			LOG(logINFO) <<__FUNCTION__<< " ===> action/" << action_type;
 			vector<ActionParam> params = action.get_params(action_type);
@@ -808,13 +999,18 @@ bool Config::process(std::string p_configFileName, std::string p_jsonResultFileN
 				action.set_param(param, ezxml_attr(xml_action, param.name.c_str()));
 			}
 			if ( action_type.compare("wait") == 0 ) action.do_wait(params);
-			else if ( action_type.compare("call") == 0 ) action.do_call(params, x_hdrs);
-			else if ( action_type.compare("accept") == 0 ) action.do_accept(params, x_hdrs);
-			else if ( action_type.compare("register") == 0 ) action.do_register(params, x_hdrs);
+			else if ( action_type.compare("call") == 0 ) action.do_call(params, checks, x_hdrs);
+			else if ( action_type.compare("accept") == 0 ) action.do_accept(params, checks, x_hdrs);
+			else if ( action_type.compare("register") == 0 ) action.do_register(params, checks, x_hdrs);
 			else if ( action_type.compare("alert") == 0 ) action.do_alert(params);
+<<<<<<< HEAD
 			else if ( action_type.compare("transfer") == 0 ) action.do_transfer(params);
+=======
+			else if ( action_type.compare("codec") == 0 ) action.do_codec(params);
+>>>>>>> f1a7b646e10d1df447b8bf04cd28e928c3cc6b58
 		}
 	}
+	return true;
 }
 
 
@@ -928,15 +1124,27 @@ void VoipPatrolEnpoint::onSelectAccount(OnSelectAccountParam &param) {
 	param.accountIndex = acc_info.id;
 }
 
+void VoipPatrolEnpoint::setCodecs(string &name, int priority) {
+	const CodecInfoVector2 codecs = codecEnum2();
+	transform(name.begin(), name.end(), name.begin(), ::tolower);
+	for (auto & c : codecs) {
+		string id = c.codecId;
+		transform(id.begin(), id.end(), id.begin(), ::tolower);
+		std::size_t found = id.find(name);
+		if (found!=std::string::npos ||  name.compare("all") == 0) {
+			LOG(logINFO) <<__FUNCTION__<<" codec id:"<< c.codecId << " new priority:" << priority;
+			codecSetPriority(c.codecId, priority);
+		} else {
+			LOG(logINFO) <<__FUNCTION__<< " codec id:" << c.codecId << " priority:" << unsigned(c.priority);
+		}
+	}
+}
 
 int main(int argc, char **argv){
 	int ret = 0;
 
 	pjsip_cfg_t *pjsip_config = pjsip_cfg();
 	LOG(logINFO) <<"pjsip_config->tsx.t1 :" << pjsip_config->tsx.t1 <<"\n";
-	// pjsip_config->tsx.t1 = 250;
-	// pjsip_config->tsx.t2 = 250;
-	// pjsip_config->tsx.t4 = 1000;
 
 	pjsip_cfg()->endpt.disable_secure_dlg_check = 1;
 
@@ -951,8 +1159,10 @@ int main(int argc, char **argv){
 	Config config(log_test_fn);
 	bool tcp_only = false;
 	bool udp_only = false;
+	int timer_ms = 0;
 
 	ep.config = &config;
+	config.ep = &ep;
 
 	// command line argument
 	for (int i = 1; i < argc; ++i) {
@@ -965,6 +1175,7 @@ int main(int argc, char **argv){
             " -p --port <5060>                  local port                \n"\
             " -c,--conf <conf.xml>              XML scenario file         \n"\
             " -l,--log <logfilename>            voip_patrol log file name \n"\
+            " -t, timer_ms <ms>                 pjsua timer_d for transaction default to 32s\n"\
             " -o,--output <result.json>         json result file name     \n"\
             " --tls-calist <path/file_name>     TLS CA list (pem format)     \n"\
             " --tls-privkey <path/file_name>    TLS private key (pem format) \n"\
@@ -982,6 +1193,10 @@ int main(int argc, char **argv){
 		} else if ( (arg == "-c") || (arg == "--conf") ) {
 			if (i + 1 < argc) {
 				conf_fn = argv[++i];
+			}
+		} else if ( (arg == "-t") || (arg == "--timer_ms") ) {
+			if (i + 1 < argc) {
+				timer_ms = atoi(argv[++i]);
 			}
 		} else if ( (arg == "--graceful-shutdown") ) {
 			config.graceful_shutdown = true;
@@ -1031,7 +1246,7 @@ int main(int argc, char **argv){
 		FILE* log_fd = fopen(log_fn.c_str(), "w");
 		Output2FILE::Stream() = log_fd;
 	}
-	if (log_fn.empty()) log_fn = "voip_patrol.log";
+	if (log_fn.empty()) log_fn = log_test_fn;
 	string log_fn_pjsua = log_fn + ".pjsua";
 	LOG(logINFO) << "\n* * * * * * *\n"
 		"voip_patrol version: "<<VERSION<<"\n"
@@ -1046,8 +1261,14 @@ int main(int argc, char **argv){
 		tcp_only = false;
 	}
 
+	//pjsip_cfg()->tsx.t1 = 100;
+	//pjsip_cfg()->tsx.t2 = 100;
+	//pjsip_cfg()->tsx.t4 = 1000;
+	if (timer_ms > 0)
+		pjsip_cfg()->tsx.td = timer_ms;
 	TransportConfig tcfg;
 	try {
+
 		ep.libCreate();
 		if (config.rewrite_ack_transport) {
 			/* Register stateless server module */
@@ -1066,12 +1287,12 @@ int main(int argc, char **argv){
 		ep_cfg.medConfig.noVad = 1;
 		// ep_cfg.uaConfig.nameserver.push_back("8.8.8.8");
 
-		ep.libInit( ep_cfg );
+		ep.libInit(ep_cfg);
 		// pjsua_set_null_snd_dev() before calling pjsua_start().
 
 		tcfg.port = port;
-		config.transport_id_tcp = -1;
 		config.transport_id_udp = -1;
+		config.transport_id_tcp = -1;
 
 		// TCP and UDP transports
 		if (!udp_only) {
@@ -1096,8 +1317,13 @@ int main(int argc, char **argv){
 			tcfg.tlsConfig.verifyServer = config.tls_cfg.verify_server;
 			tcfg.tlsConfig.verifyClient = config.tls_cfg.verify_client;
 			// Optional, set ciphers. You can select a certain cipher/rearrange the order of ciphers here.
-			// tcfg.ciphers = ep->utilSslGetAvailableCiphers();
+			// tcfg.tlsConfig.ciphers = ep.utilSslGetAvailableCiphers();
 			config.transport_id_tls = ep.transportCreate(PJSIP_TRANSPORT_TLS, tcfg);
+			LOG(logINFO) <<__FUNCTION__<<": TLS tcfg.tlsConfig.ca_list      :"<< tcfg.tlsConfig.CaListFile;
+			LOG(logINFO) <<__FUNCTION__<<": TLS tcfg.tlsConfig.certFile     :"<< tcfg.tlsConfig.certFile;
+			LOG(logINFO) <<__FUNCTION__<<": TLS tcfg.tlsConfig.privKeyFile  :"<< tcfg.tlsConfig.privKeyFile;
+			LOG(logINFO) <<__FUNCTION__<<": TLS tcfg.tlsConfig.verifyServer :"<< tcfg.tlsConfig.verifyServer;
+			LOG(logINFO) <<__FUNCTION__<<": TLS tcfg.tlsConfig.verifyClient :"<< tcfg.tlsConfig.verifyClient;
 			LOG(logINFO) <<__FUNCTION__<<": TLS supported :"<< config.tls_cfg.certificate;
 		} catch (Error & err) {
 			config.transport_id_tls = -1;
@@ -1134,28 +1360,40 @@ int main(int argc, char **argv){
 		ret = 1;
 	}
 
+	bool disconnecting = true;
+	while (disconnecting) {
+		disconnecting = false;
+		for (auto & call : config.calls) {
 
-	for (auto & call : config.calls) {
-		pjsua_call_info pj_ci;
-		pjsua_call_id call_id;
-    		CallInfo ci;
-		pj_status_t status = pjsua_call_get_info(call_id, &pj_ci); 
-		if (status != PJ_SUCCESS) {
-			LOG(logINFO) << "can not get call info, removing call["<< call->getId() <<"]["<< call <<"] "<< config.removeCall(call);
-			continue;
-		}
-		ci.fromPj(pj_ci);	
+			pjsua_call_info pj_ci;
+			pjsua_call_id call_id;
+			CallInfo ci;
+			if (call->is_disconnecting()) { // wait for call disconnections
+					if (call->test && call->test->completed) config.removeCall(call);
+					disconnecting = true;
+					continue;
+			}
+			pj_status_t status = pjsua_call_get_info(call_id, &pj_ci); 
+			LOG(logINFO) << "disconnecting >>> call["<< call->getId() <<"]["<< call <<"] ";
+			if (status != PJ_SUCCESS) {
+				LOG(logINFO) << "can not get call info, removing call["<< call->getId() <<"]["<< call <<"] "<< config.removeCall(call);
+				continue;
+			}
+			ci.fromPj(pj_ci);
 
-		CallOpParam prm(true);
-		if (ci.state != PJSIP_INV_STATE_DISCONNECTED) {
-			LOG(logINFO) << "call hangup["<< call <<"] "<< config.removeCall(call);
-			try {
-				call->hangup(prm);
-			} catch (pj::Error e)  {
-				LOG(logERROR) <<__FUNCTION__<<" error :" << e.status;
+			CallOpParam prm(true);
+			if (ci.state != PJSIP_INV_STATE_DISCONNECTED) {
+				disconnecting = true;
+				try {
+					call->hangup(prm);
+				} catch (pj::Error e)  {
+					LOG(logERROR) <<__FUNCTION__<<" error :" << e.status;
+				}
+			} else {
+				LOG(logINFO) << "removing call["<< call->getId() <<"]["<< call <<"] "<< config.removeCall(call);
 			}
 		}
-		LOG(logINFO) << "removing call["<< call->getId() <<"]["<< call <<"] "<< config.removeCall(call);
+		pj_thread_sleep(50);
 	}
 
 	try {

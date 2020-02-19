@@ -18,6 +18,7 @@
 
 #include "voip_patrol.hh"
 #include "action.hh"
+#include "string.h"
 
 Action::Action(Config *cfg) : config{cfg} {
 	init_actions_params();
@@ -26,11 +27,19 @@ Action::Action(Config *cfg) : config{cfg} {
 
 vector<ActionParam> Action::get_params(string name) {
 	if (name.compare("call") == 0) return do_call_params;
+<<<<<<< HEAD
 	if (name.compare("register") == 0) return do_register_params;
 	if (name.compare("wait") == 0) return do_wait_params;
 	if (name.compare("accept") == 0) return do_accept_params;
 	if (name.compare("alert") == 0) return do_alert_params;
 	if (name.compare("transfer") == 0) return do_transfer_params;
+=======
+	else if (name.compare("register") == 0) return do_register_params;
+	else if (name.compare("wait") == 0) return do_wait_params;
+	else if (name.compare("accept") == 0) return do_accept_params;
+	else if (name.compare("alert") == 0) return do_alert_params;
+	else if (name.compare("codec") == 0) return do_codec_params;
+>>>>>>> f1a7b646e10d1df447b8bf04cd28e928c3cc6b58
 	vector<ActionParam> empty_params;
 	return empty_params;
 }
@@ -46,8 +55,10 @@ string Action::get_env(string env) {
 
 bool Action::set_param(ActionParam &param, const char *val) {
 			if (!val) return false;
+			LOG(logINFO) <<__FUNCTION__<< " param name:" << param.name << " val:" << val; 
 			if (param.type == APType::apt_bool) {
-				param.b_val = true;
+				if( strcmp(val, "false") ==  0 )  param.b_val = false;
+				else param.b_val = true;
 			} else if (param.type == APType::apt_integer) {
 				param.i_val = atoi(val);
 			} else if (param.type == APType::apt_float) {
@@ -85,7 +96,9 @@ void Action::init_actions_params() {
 	do_call_params.push_back(ActionParam("max_duration", false, APType::apt_integer));
 	do_call_params.push_back(ActionParam("min_mos", false, APType::apt_float));
 	do_call_params.push_back(ActionParam("rtp_stats", false, APType::apt_bool));
+	do_call_params.push_back(ActionParam("late_start", false, APType::apt_bool));
 	do_call_params.push_back(ActionParam("hangup", false, APType::apt_integer));
+	do_call_params.push_back(ActionParam("re_invite_interval", false, APType::apt_integer));
 	do_call_params.push_back(ActionParam("play", false, APType::apt_string));
 	do_call_params.push_back(ActionParam("play_dtmf", false, APType::apt_string));
 	do_call_params.push_back(ActionParam("timer", false, APType::apt_string));
@@ -99,6 +112,7 @@ void Action::init_actions_params() {
 	do_register_params.push_back(ActionParam("username", false, APType::apt_string));
 	do_register_params.push_back(ActionParam("account", false, APType::apt_string));
 	do_register_params.push_back(ActionParam("password", false, APType::apt_string));
+	do_register_params.push_back(ActionParam("unregister", false, APType::apt_bool));
 	do_register_params.push_back(ActionParam("expected_cause_code", false, APType::apt_integer));
 	// do_accept
 	do_accept_params.push_back(ActionParam("account", false, APType::apt_string));
@@ -110,10 +124,13 @@ void Action::init_actions_params() {
 	do_accept_params.push_back(ActionParam("early_media", false, APType::apt_bool));
 	do_accept_params.push_back(ActionParam("wait_until", false, APType::apt_string));
 	do_accept_params.push_back(ActionParam("hangup", false, APType::apt_integer));
+	do_accept_params.push_back(ActionParam("re_invite_interval", false, APType::apt_integer));
 	do_accept_params.push_back(ActionParam("min_mos", false, APType::apt_float));
 	do_accept_params.push_back(ActionParam("rtp_stats", false, APType::apt_bool));
+	do_accept_params.push_back(ActionParam("late_start", false, APType::apt_bool));
 	do_accept_params.push_back(ActionParam("play", false, APType::apt_string));
 	do_accept_params.push_back(ActionParam("code", false, APType::apt_integer));
+	do_accept_params.push_back(ActionParam("call_count", false, APType::apt_integer));
 	do_accept_params.push_back(ActionParam("reason", false, APType::apt_string));
 	do_accept_params.push_back(ActionParam("play_dtmf", false, APType::apt_string));
 	do_accept_params.push_back(ActionParam("timer", false, APType::apt_string));
@@ -124,13 +141,20 @@ void Action::init_actions_params() {
 	do_alert_params.push_back(ActionParam("email", false, APType::apt_string));
 	do_alert_params.push_back(ActionParam("email_from", false, APType::apt_string));
 	do_alert_params.push_back(ActionParam("smtp_host", false, APType::apt_string));
+<<<<<<< HEAD
 	// do_transfer
 	do_transfer_params.push_back(ActionParam("blind", false, APType::apt_bool));
 	do_transfer_params.push_back(ActionParam("attended", false, APType::apt_bool));
 	do_transfer_params.push_back(ActionParam("to_uri", false, APType::apt_string));
+=======
+	// do_codec
+	do_codec_params.push_back(ActionParam("priority", false, APType::apt_integer));
+	do_codec_params.push_back(ActionParam("enable", false, APType::apt_string));
+	do_codec_params.push_back(ActionParam("disable", false, APType::apt_string));
+>>>>>>> f1a7b646e10d1df447b8bf04cd28e928c3cc6b58
 }
 
-void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers) {
+void Action::do_register(vector<ActionParam> &params, vector<ActionCheck> &checks, SipHeaderVector &x_headers) {
 	string type {"register"};
 	string transport {};
 	string label {};
@@ -141,6 +165,7 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 	string account_name {};
 	string password {};
 	int expected_cause_code {200};
+	bool unregister {false};
 
 	for (auto param : params) {
 		if (param.name.compare("transport") == 0) transport = param.s_val;
@@ -151,6 +176,7 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 		else if (param.name.compare("account") == 0) account_name = param.s_val;
 		else if (param.name.compare("username") == 0) username = param.s_val;
 		else if (param.name.compare("password") == 0) password = param.s_val;
+		else if (param.name.compare("unregister") == 0) unregister = param.b_val;
 		else if (param.name.compare("expected_cause_code") == 0) expected_cause_code = param.i_val;
 	}
 
@@ -160,6 +186,34 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 	}
 
 	if (account_name.empty()) account_name = username;
+	account_name = account_name + "@" + registrar;
+	TestAccount *acc = config->findAccount(account_name);
+	if (unregister) {
+		if (acc) {
+			// We should probably create a new test ...
+			if (acc->test) acc->test->type = "unregister";
+			LOG(logINFO) <<__FUNCTION__<< " unregister ("<<account_name<<")";
+			AccountInfo acc_inf = acc->getInfo();
+			if (acc_inf.regIsActive) {
+				LOG(logINFO) <<__FUNCTION__<< " register is active";
+				try {
+					acc->setRegistration(false);
+				} catch (pj::Error e)  {
+					LOG(logERROR) <<__FUNCTION__<<" error :" << e.status << std::endl;
+				}
+			} else {
+				LOG(logINFO) <<__FUNCTION__<< " register is not active";
+			}
+			while (acc_inf.regIsActive) {
+				pj_thread_sleep(10);
+				acc_inf = acc->getInfo();
+			}
+			return;
+		} else {
+			LOG(logINFO) <<__FUNCTION__<< "unregister: account not found ("<<account_name<<")";
+		}
+	}
+
 	Test *test = new Test(config, type);
 	test->local_user = username;
 	test->remote_user = username;
@@ -168,7 +222,7 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 	test->from = username;
 	test->type = type;
 
-	LOG(logINFO) <<__FUNCTION__<< " sip:" + account_name + "@" + registrar  ;
+	LOG(logINFO) <<__FUNCTION__<< " >> sip:" + account_name;
 	AccountConfig acc_cfg;
 	SipHeader sh;
 	sh.hName = "User-Agent";
@@ -191,7 +245,7 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 		}
 	}
 	if (acc_cfg.sipConfig.transportId == config->transport_id_tls) {
-		acc_cfg.idUri = "sips:" + account_name + "@" + registrar;
+		acc_cfg.idUri = "sips:" + account_name;
 		acc_cfg.regConfig.registrarUri = "sips:" + registrar;
 		if (!proxy.empty())
 			acc_cfg.sipConfig.proxies.push_back("sips:" + proxy);
@@ -206,7 +260,7 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 		LOG(logINFO) <<__FUNCTION__<< " SIP URI Scheme";
 	} else {
 		LOG(logINFO) <<__FUNCTION__<< " SIP URI Scheme";
-		acc_cfg.idUri = "sip:vp@" + registrar;
+		acc_cfg.idUri = "sip:" + account_name;
 		acc_cfg.regConfig.registrarUri = "sip:" + registrar;
 		if (!proxy.empty())
 			acc_cfg.sipConfig.proxies.push_back("sip:" + proxy);
@@ -214,7 +268,6 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 	}
 	acc_cfg.sipConfig.authCreds.push_back( AuthCredInfo("digest", realm, username, 0, password) );
 
-	TestAccount *acc = config->findAccount(account_name);
 	if (!acc) {
 		acc = config->createAccount(acc_cfg);
 	} else {
@@ -223,7 +276,7 @@ void Action::do_register(vector<ActionParam> &params, SipHeaderVector &x_headers
 	acc->setTest(test);
 }
 
-void Action::do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_headers) {
+void Action::do_accept(vector<ActionParam> &params, vector<ActionCheck> &checks, pj::SipHeaderVector &x_headers) {
 	string type {"accept"};
 	string account_name {};
 	string transport {};
@@ -236,9 +289,12 @@ void Action::do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_heade
 	int ring_duration {0};
 	int early_media {false};
 	int hangup_duration {0};
+	int re_invite_interval {0};
 	call_state_t wait_until {INV_STATE_NULL};
 	bool rtp_stats {false};
+	bool late_start {false};
 	int code {200};
+	int call_count {-1};
 	int response_delay {0};
 	string reason {};
 
@@ -249,6 +305,7 @@ void Action::do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_heade
 		else if (param.name.compare("play_dtmf") == 0 && param.s_val.length() > 0) play_dtmf = param.s_val;
 		else if (param.name.compare("timer") == 0 && param.s_val.length() > 0) timer = param.s_val;
 		else if (param.name.compare("code") == 0) code = param.i_val;
+		else if (param.name.compare("call_count") == 0) call_count = param.i_val;
 		else if (param.name.compare("reason") == 0 && param.s_val.length() > 0) reason = param.s_val;
 		else if (param.name.compare("label") == 0) label = param.s_val;
 		else if (param.name.compare("max_duration") == 0) max_duration = param.i_val;
@@ -256,8 +313,10 @@ void Action::do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_heade
 		else if (param.name.compare("early_media") == 0) early_media = param.b_val;
 		else if (param.name.compare("min_mos") == 0) min_mos = param.f_val;
 		else if (param.name.compare("rtp_stats") == 0) rtp_stats = param.b_val;
+		else if (param.name.compare("late_start") == 0) late_start = param.b_val;
 		else if (param.name.compare("wait_until") == 0) wait_until = get_call_state_from_string(param.s_val);
 		else if (param.name.compare("hangup") == 0) hangup_duration = param.i_val;
+		else if (param.name.compare("re_invite_interval") == 0) re_invite_interval = param.i_val;
 		else if (param.name.compare("response_delay") == 0) response_delay = param.i_val;
 	}
 
@@ -269,10 +328,11 @@ void Action::do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_heade
 	TestAccount *acc = config->findAccount(account_name);
 	if (!acc) {
 		AccountConfig acc_cfg;
-		acc_cfg.sipConfig.transportId = config->transport_id_udp;
 		if (!transport.empty()) {
 			if (transport.compare("tcp") == 0) {
 				acc_cfg.sipConfig.transportId = config->transport_id_tcp;
+			} else if (transport.compare("udp") == 0) {
+				acc_cfg.sipConfig.transportId = config->transport_id_udp;
 			} else if (transport.compare("tls") == 0) {
 				if (config->transport_id_tls == -1) {
 					LOG(logERROR) <<__FUNCTION__<<": TLS transport not supported.";
@@ -287,24 +347,27 @@ void Action::do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_heade
 			acc_cfg.idUri = "sip:" + account_name;
 		}
 		if (!timer.empty()) {
-			if (timer.compare("inactive")) {
+			if (timer.compare("inactive") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_INACTIVE;
-			} else if (timer.compare("optionnal")) {
+			} else if (timer.compare("optionnal") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_OPTIONAL;
-			} else if (timer.compare("required")) {
+			} else if (timer.compare("required") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_REQUIRED;
-			} else if (timer.compare("always")) {
+			} else if (timer.compare("always") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_ALWAYS;
 			}
+			LOG(logINFO) <<__FUNCTION__<<":session timer["<<timer<<"]: "<< acc_cfg.callConfig.timerUse ;
 		}
 		acc = config->createAccount(acc_cfg);
 	}
 	acc->hangup_duration = hangup_duration;
+	acc->re_invite_interval = re_invite_interval;
 	acc->response_delay = response_delay;
 	acc->max_duration = max_duration;
 	acc->ring_duration = ring_duration;
 	acc->accept_label = label;
 	acc->rtp_stats = rtp_stats;
+	acc->late_start= late_start;
 	acc->play = play;
 	acc->play_dtmf = play_dtmf;
 	acc->timer = timer;
@@ -312,11 +375,13 @@ void Action::do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_heade
 	acc->wait_state = wait_until;
 	acc->reason = reason;
 	acc->code = code;
+	acc->call_count = call_count;
 	acc->x_headers = x_headers;
+	acc->checks = checks;
 }
 
 
-void Action::do_call(vector<ActionParam> &params, SipHeaderVector &x_headers) {
+void Action::do_call(vector<ActionParam> &params, vector<ActionCheck> &checks, SipHeaderVector &x_headers) {
 	string type {"call"};
 	string play {default_playback_file};
 	string play_dtmf {};
@@ -338,9 +403,11 @@ void Action::do_call(vector<ActionParam> &params, SipHeaderVector &x_headers) {
 	int max_calling_duration {0};
 	int expected_duration {0};
 	int hangup_duration {0};
+	int re_invite_interval {0};
 	int repeat {0};
 	bool recording {false};
 	bool rtp_stats {false};
+	bool late_start {false};
 
 	for (auto param : params) {
 		if (param.name.compare("callee") == 0) callee = param.s_val;
@@ -360,10 +427,12 @@ void Action::do_call(vector<ActionParam> &params, SipHeaderVector &x_headers) {
 		else if (param.name.compare("wait_until") == 0) wait_until = get_call_state_from_string(param.s_val);
 		else if (param.name.compare("min_mos") == 0) min_mos = param.f_val;
 		else if (param.name.compare("rtp_stats") == 0) rtp_stats = param.b_val;
+		else if (param.name.compare("late_start") == 0) late_start = param.b_val;
 		else if (param.name.compare("max_duration") == 0) max_duration = param.i_val;
 		else if (param.name.compare("max_calling_duration") == 0) max_calling_duration = param.i_val;
 		else if (param.name.compare("duration") == 0) expected_duration = param.i_val;
 		else if (param.name.compare("hangup") == 0) hangup_duration = param.i_val;
+		else if (param.name.compare("re_invite_interval") == 0) re_invite_interval = param.i_val;
 		else if (param.name.compare("repeat") == 0) repeat = param.i_val;
 		else if (param.name.compare("recording") == 0) recording = true;
 	}
@@ -373,21 +442,25 @@ void Action::do_call(vector<ActionParam> &params, SipHeaderVector &x_headers) {
 		return;
 	}
 
-	TestAccount* acc = config->findAccount(caller);
+	string account_uri {caller};
+	if (transport.compare("udp") != 0)
+		account_uri = caller + ";transport=" + transport;
+	TestAccount* acc = config->findAccount(account_uri);
 	if (!acc) {
 		AccountConfig acc_cfg;
 		if (!proxy.empty())
 			acc_cfg.sipConfig.proxies.push_back("sip:" + proxy);
 		if (!timer.empty()) {
-			if (timer.compare("inactive")) {
+			if (timer.compare("inactive") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_INACTIVE;
-			} else if (timer.compare("optionnal")) {
+			} else if (timer.compare("optionnal") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_OPTIONAL;
-			} else if (timer.compare("required")) {
+			} else if (timer.compare("required") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_REQUIRED;
-			} else if (timer.compare("always")) {
+			} else if (timer.compare("always") == 0) {
 				acc_cfg.callConfig.timerUse = PJSUA_SIP_TIMER_ALWAYS;
 			}
+			LOG(logERROR) <<__FUNCTION__<<": session timer["<<timer<<"] : "<< acc_cfg.callConfig.timerUse ;
 		}
 		acc_cfg.sipConfig.transportId = config->transport_id_udp;
 		if (!transport.empty()) {
@@ -402,9 +475,9 @@ void Action::do_call(vector<ActionParam> &params, SipHeaderVector &x_headers) {
 			}
 		}
 		if (acc_cfg.sipConfig.transportId == config->transport_id_tls) {
-			acc_cfg.idUri = "sips:" + caller;
+			acc_cfg.idUri = "sips:" + account_uri;
 		} else {
-			acc_cfg.idUri = "sip:" + caller;
+			acc_cfg.idUri = "sip:" + account_uri;
 		}
 		if (!from.empty())
 			acc_cfg.idUri = from;
@@ -432,8 +505,11 @@ void Action::do_call(vector<ActionParam> &params, SipHeaderVector &x_headers) {
 		test->max_duration = max_duration;
 		test->max_calling_duration = max_calling_duration;
 		test->hangup_duration = hangup_duration;
+		test->re_invite_interval = re_invite_interval;
+		test->re_invite_next = re_invite_interval;
 		test->recording = recording;
 		test->rtp_stats = rtp_stats;
+		test->late_start = late_start;
 		std::size_t pos = caller.find("@");
 		if (pos!=std::string::npos) {
 			test->local_user = caller.substr(0, pos);
@@ -491,6 +567,26 @@ void Action::do_call(vector<ActionParam> &params, SipHeaderVector &x_headers) {
 	} while (repeat >= 0);
 }
 
+void Action::do_codec(vector<ActionParam> &params) {
+	string enable {};
+	int priority {0};
+	string disable {};
+	for (auto param : params) {
+		if (param.name.compare("enable") == 0) enable = param.s_val;
+		else if (param.name.compare("priority") == 0) priority = param.i_val;
+		else if (param.name.compare("disable") == 0) disable = param.s_val;
+	}
+	LOG(logINFO) << __FUNCTION__ << " enable["<<enable<<"] with priority["<<priority<<"] disable["<<disable<<"]";
+	if (!config->ep) {
+		LOG(logERROR) << __FUNCTION__ << " PJSIP endpoint not available";
+		return;
+	}
+	if (!disable.empty())
+		config->ep->setCodecs(disable, 0);
+	if (!enable.empty())
+		config->ep->setCodecs(enable, priority);
+}
+
 void Action::do_alert(vector<ActionParam> &params) {
 	string email {};
 	string email_from {};
@@ -526,6 +622,9 @@ void Action::do_wait(vector<ActionParam> &params) {
 			} else if (account->test) {
 				tests_running++;
 			}
+			if (account->call_count > 0) {
+				tests_running++;
+			}
 		}
 		for (auto & call : config->calls) {
 			if (call->test && call->test->state == VPT_DONE){
@@ -544,8 +643,10 @@ void Action::do_wait(vector<ActionParam> &params) {
 					Test *test = call->test;
 					if (test->ring_duration > 0 && ci.totalDuration.sec >= test->ring_duration) {
 						CallOpParam prm;
-						if (test->reason.size() > 0) prm.reason = test->reason;
+						//if (test->reason.size() > 0) prm.reason = test->reason;
+						prm.reason = "OK";
 						if (test->code) prm.statusCode = test->code;
+						else prm.statusCode = PJSIP_SC_OK;
 						call->answer(prm);
 					} else if (test->max_calling_duration && test->max_calling_duration <= ci.totalDuration.sec) {
 						LOG(logINFO) <<__FUNCTION__<<"[cancelling:call]["<<call->getId()<<"][test]["<<(ci.role==0?"CALLER":"CALLEE")<<"]["
@@ -564,6 +665,22 @@ void Action::do_wait(vector<ActionParam> &params) {
 					call->test->setup_duration = ci.totalDuration.sec - ci.connectDuration.sec;
 					call->test->result_cause_code = (int)ci.lastStatusCode;
 					call->test->reason = ci.lastReason;
+					// check re-invite
+					if (call->test->re_invite_interval && ci.connectDuration.sec >= call->test->re_invite_next){
+						if (ci.state == PJSIP_INV_STATE_CONFIRMED) {
+							CallOpParam prm(true);
+							prm.opt.audioCount = 1;
+							prm.opt.videoCount = 0;
+							LOG(logINFO) <<__FUNCTION__<<" re-invite : call in PJSIP_INV_STATE_CONFIRMED" ;
+							try {
+								call->reinvite(prm);
+								call->test->re_invite_next = call->test->re_invite_next + call->test->re_invite_interval;
+							} catch (pj::Error e)  {
+								if (e.status != 171140) LOG(logERROR) <<__FUNCTION__<<" error :" << e.status << std::endl;
+							}
+						}
+					}
+					// check hangup
 					if (call->test->hangup_duration && ci.connectDuration.sec >= call->test->hangup_duration){
 						if (ci.state == PJSIP_INV_STATE_CONFIRMED) {
 							CallOpParam prm(true);

@@ -20,9 +20,11 @@
 #define VOIP_PATROL_ACTION_H
 
 #include "voip_patrol.hh"
+#include "check.hh"
 #include <pjsua2.hpp>
 
 class Config;
+class ActionCheck;
 
 using namespace std;
 
@@ -40,18 +42,23 @@ struct ActionParam {
 	bool required;
 };
 
+
 class Action {
 	public:
 			Action(Config *cfg);
 			vector<ActionParam> get_params(string);
 			bool set_param(ActionParam&, const char *val);
 			bool set_param_by_name(vector<ActionParam> *params, const string name, const char *val=nullptr);
-			void do_call(vector<ActionParam> &params, pj::SipHeaderVector &x_headers);
-			void do_accept(vector<ActionParam> &params, pj::SipHeaderVector &x_headers);
+			void do_call(vector<ActionParam> &params, vector<ActionCheck> &checks, pj::SipHeaderVector &x_headers);
+			void do_accept(vector<ActionParam> &params, vector<ActionCheck> &checks, pj::SipHeaderVector &x_headers);
 			void do_wait(vector<ActionParam> &params);
-			void do_register(vector<ActionParam> &params, pj::SipHeaderVector &x_headers);
+			void do_register(vector<ActionParam> &params, vector<ActionCheck> &checks, pj::SipHeaderVector &x_headers);
 			void do_alert(vector<ActionParam> &params);
+<<<<<<< HEAD
 			void do_transfer(vector<ActionParam> &params);
+=======
+			void do_codec(vector<ActionParam> &params);
+>>>>>>> f1a7b646e10d1df447b8bf04cd28e928c3cc6b58
 			void set_config(Config *);
 			Config* get_config();
 	private:
@@ -62,7 +69,11 @@ class Action {
 			vector<ActionParam> do_wait_params;
 			vector<ActionParam> do_accept_params;
 			vector<ActionParam> do_alert_params;
+<<<<<<< HEAD
 			vector<ActionParam> do_transfer_params;
+=======
+			vector<ActionParam> do_codec_params;
+>>>>>>> f1a7b646e10d1df447b8bf04cd28e928c3cc6b58
 			Config* config;
 };
 

@@ -80,6 +80,15 @@ class ResultFile {
 };
 
 
+class VoipPatrolEnpoint : public Endpoint {
+	public:
+		Config *config;
+		void setCodecs(string &list, int priority);
+	private:
+		void onSelectAccount(OnSelectAccountParam &param);
+};
+
+
 class Config {
 	public:
 		Config(std::string result_file_name);
@@ -117,6 +126,7 @@ class Config {
 			int verify_client;
 		} tls_cfg;
 		std::vector<Test *> tests_with_rtp_stats;
+		VoipPatrolEnpoint *ep;
 	private:
 		std::string configFileName;
 };
@@ -148,25 +158,29 @@ class Test {
 		Test(Config *config, string type);
 		std::string type;
 		void update_result(void);
-		std::string from;
-		std::string to;
-		int expected_cause_code;
+		std::string from{""};
+		std::string to{""};
+		int expected_cause_code{-1};
 		pjsip_status_code code;
-		int result_cause_code;
-		bool completed;
+		int result_cause_code{-1};
+		bool completed{false};
 		std::string start_time;
 		std::string end_time;
-		float min_mos;
-		bool rtp_stats;
-		float mos;
-		std::string reason;
-		int connect_duration;
-		int hangup_duration;
-		int setup_duration;
-		int expected_duration;
-		int max_duration;
-		int ring_duration;
-		int max_calling_duration;
+		float min_mos{0.0};
+		float mos{0.0};
+		bool rtp_stats{false};
+		bool late_start{false};
+		std::string reason{""};
+		int connect_duration{0};
+		int hangup_duration{0};
+		int re_invite_next{0};
+		int re_invite_interval{0};
+		int setup_duration{0};
+		int expected_duration{0};
+		int max_duration{0};
+		int ring_duration{0};
+		int rtp_stats_count{0};
+		int max_calling_duration{0};
 		void get_mos();
 		std::string local_user;
 		std::string local_uri;
@@ -175,34 +189,29 @@ class Test {
 		std::string remote_uri;
 		std::string remote_contact;
 		std::string call_direction;
-		std::string sip_call_id;
-		std::string label;
+		std::string sip_call_id{""};
+		std::string label{"-"};
 		std::string transport;
 		std::string peer_socket;
 		std::string dtmf_recv;
-		call_state_t wait_state;
-		test_state_t state;
-		int call_id;
-		bool recording;
-		bool playing;
+		call_state_t wait_state{INV_STATE_NULL};
+		test_state_t state{VPT_RUN};
+		int call_id{0};
+		bool recording{false};
+		bool playing{false};
 		string record_fn;
 		string reference_fn;
 		string rtp_stats_json;
 		string play;
 		string play_dtmf;
-		bool rtp_stats_ready;
-		bool queued;
+		bool rtp_stats_ready{false};
+		bool queued{false};
+		vector<ActionCheck> checks;
 	private:
 		Config *config;
 		std::mutex process_result;
 };
 
-class VoipPatrolEnpoint : public Endpoint {
-	public:
-		Config *config;
-	private:
-		void onSelectAccount(OnSelectAccountParam &param);
-};
 
 class TestAccount : public Account {
 	public:
@@ -216,12 +225,15 @@ class TestAccount : public Account {
 		virtual void onRegState(OnRegStateParam &prm);
 		virtual void onIncomingCall(OnIncomingCallParam &iprm);
 		int hangup_duration;
+		int re_invite_interval{0};
 		int max_duration;
 		int ring_duration;
 		int response_delay;
 		bool rtp_stats;
+		bool late_start;
 		bool early_media;
 		SipHeaderVector x_headers;
+		int call_count;
 		string play;
 		string play_dtmf;
 		string timer;
@@ -229,6 +241,7 @@ class TestAccount : public Account {
 		std::string accept_label;
 		string reason;
 		int code;
+		vector<ActionCheck> checks;
 };
 
 class TestCall : public Call {
@@ -243,16 +256,20 @@ class TestCall : public Call {
 		virtual void onCallTransferStatus(OnCallTransferStatusParam &prm);
 		virtual void onCallMediaState(OnCallMediaStateParam &prm);
 		virtual void onStreamCreated(OnStreamCreatedParam &prm);
+		virtual void onCallMediaState(OnCallMediaStateParam &prm);
+		virtual void onCallMediaUpdate(OnCallMediaStateParam &prm);
 		virtual void onStreamDestroyed(OnStreamDestroyedParam &prm);
 		virtual void onDtmfDigit(OnDtmfDigitParam &prm);
-		void makeCall(const string &dst_uri, const CallOpParam &prm, const string &to_uri) throw(Error);
-		pjsua_recorder_id recorder_id;
-		pjsua_player_id player_id;
+		void makeCall(const string &dst_uri, const CallOpParam &prm, const string &to_uri);
+		void hangup(const CallOpParam &prm);
+		pjsua_recorder_id recorder_id{-1};
+		pjsua_player_id player_id{-1};
 		int role;
 		int rtt;
-	private:
+		bool is_disconnecting(){return disconnecting;};
 		TestAccount *acc;
-
+	private:
+		bool disconnecting;
 };
 
 
